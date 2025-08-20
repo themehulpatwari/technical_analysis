@@ -1,0 +1,13 @@
+[project]
+name = "technical-analysis"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.5",
+    "numpy>=2.3.2",
+    "pandas>=2.3.1",
+    "ta-lib>=0.6.5",
+    "yfinance>=0.2.65",
+]
