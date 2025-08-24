@@ -30,9 +30,9 @@ class Config:
     REQUEST_DELAY: float = 0.1  # Delay between API requests
     DEFAULT_PERIOD: str = '6mo'
     # Threading configuration
-    MAX_ANALYSIS_THREADS: int = 4    # Threads for stock analysis (CPU intensive)
-    MAX_FETCH_THREADS: int = 5       # Threads for data fetching (I/O intensive)
-    MAX_FILTER_THREADS: int = 6      # Threads for stock filtering (I/O intensive)
+    MAX_ANALYSIS_THREADS: int = 2    # Threads for stock analysis (CPU intensive)
+    MAX_FETCH_THREADS: int = 3       # Threads for data fetching (I/O intensive)
+    MAX_FILTER_THREADS: int = 3      # Threads for stock filtering (I/O intensive)
     # New symbol fetching configuration
     MAX_SYMBOLS: int = None  # Set to None for no limit, or a number to limit symbols for testing
     USE_WEB_FETCH: bool = True  # Set to False to skip web fetch and use only fallback
