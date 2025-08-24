@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "technical-analysis"
 version = "0.1.0"
@@ -8,6 +12,12 @@ dependencies = [
     "matplotlib>=3.10.5",
     "numpy>=2.3.2",
     "pandas>=2.3.1",
+    "psutil>=7.0.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
     "ta-lib>=0.6.5",
     "yfinance>=0.2.65",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
