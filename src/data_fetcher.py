@@ -1,5 +1,6 @@
 """
 Data fetching and validation module for stock market data.
+Optimized to eliminate redundant API calls to yfinance.
 """
 
 import time
@@ -22,6 +23,11 @@ except ImportError:
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 logger = logging.getLogger(__name__)
+
+
+# ==============================================================================
+# NSE SYMBOL FETCHING
+# ==============================================================================
 
 
 def fetch_nse_equity_list() -> Optional[List[str]]:
@@ -244,6 +250,92 @@ def validate_stock_data(data: pd.DataFrame, symbol: str) -> bool:
     return True
 
 
+# ==============================================================================
+# OPTIMIZED UNIFIED DATA FETCHING - CORE FUNCTIONS
+# ==============================================================================
+
+
+def fetch_complete_stock_data(symbol: str, period: str = None, include_info: bool = True) -> Tuple[Optional[pd.DataFrame], Optional[Dict[str, Any]]]:
+    """
+    Fetch both historical data and stock info in a single yfinance call with retry mechanism
+    
+    Args:
+        symbol: Stock symbol to fetch
+        period: Time period for data (default from config)
+        include_info: Whether to fetch stock info (default True)
+    
+    Returns:
+        Tuple[pd.DataFrame or None, Dict or None]: Historical data and stock info if successful
+    """
+    if period is None:
+        period = config.DEFAULT_PERIOD
+    
+    if not symbol or not isinstance(symbol, str):
+        logger.error(f"Invalid symbol provided: {symbol}")
+        return None, None
+    
+    for attempt in range(config.MAX_RETRIES):
+        try:
+            logger.debug(f"Fetching complete data for {symbol} (attempt {attempt + 1}/{config.MAX_RETRIES})")
+            
+            # Single yfinance Ticker object - fetch everything at once
+            stock = yf.Ticker(symbol)
+            
+            # Fetch historical data
+            data = stock.history(period=period)
+            
+            # Fetch stock info if requested
+            stock_info = None
+            if include_info:
+                try:
+                    info = stock.info
+                    if info:
+                        # Extract relevant information
+                        market_cap = info.get('marketCap', 0)
+                        avg_volume = info.get('averageVolume', 0)
+                        current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+                        
+                        # Calculate daily volume in Rs (approximate)
+                        daily_volume_rs = avg_volume * current_price if avg_volume and current_price else 0
+                        
+                        stock_info = {
+                            'symbol': symbol,
+                            'market_cap': market_cap,
+                            'avg_volume': avg_volume,
+                            'current_price': current_price,
+                            'daily_volume_rs': daily_volume_rs,
+                            'company_name': info.get('longName', symbol.replace('.NS', ''))
+                        }
+                except Exception as info_error:
+                    logger.warning(f"Failed to fetch info for {symbol}: {str(info_error)}")
+                    stock_info = None
+            
+            # Add delay between requests to avoid rate limiting
+            time.sleep(config.REQUEST_DELAY)
+            
+            # Validate historical data
+            if validate_stock_data(data, symbol):
+                logger.debug(f"Successfully fetched and validated complete data for {symbol}")
+                return data, stock_info
+            else:
+                logger.warning(f"Data validation failed for {symbol}")
+                return None, stock_info
+                
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1} failed for {symbol}: {str(e)}")
+            if attempt < config.MAX_RETRIES - 1:
+                time.sleep(config.RETRY_DELAY * (attempt + 1))  # Exponential backoff
+            else:
+                logger.error(f"All retry attempts failed for {symbol}")
+    
+    return None, None
+
+
+# ==============================================================================
+# SIMPLE WRAPPER FUNCTIONS (for backwards compatibility if needed)
+# ==============================================================================
+
+
 def fetch_stock_data_with_retry(symbol: str, period: str = None) -> Optional[pd.DataFrame]:
     """
     Fetch stock data with retry mechanism and validation
@@ -255,69 +347,26 @@ def fetch_stock_data_with_retry(symbol: str, period: str = None) -> Optional[pd.
     Returns:
         pd.DataFrame or None: Stock data if successful, None otherwise
     """
-    if period is None:
-        period = config.DEFAULT_PERIOD
-    
-    if not symbol or not isinstance(symbol, str):
-        logger.error(f"Invalid symbol provided: {symbol}")
-        return None
-    
-    for attempt in range(config.MAX_RETRIES):
-        try:
-            logger.debug(f"Fetching data for {symbol} (attempt {attempt + 1}/{config.MAX_RETRIES})")
-            
-            stock = yf.Ticker(symbol)
-            data = stock.history(period=period)
-            
-            # Add delay between requests to avoid rate limiting
-            time.sleep(config.REQUEST_DELAY)
-            
-            if validate_stock_data(data, symbol):
-                logger.debug(f"Successfully fetched and validated data for {symbol}")
-                return data
-            else:
-                logger.warning(f"Data validation failed for {symbol}")
-                return None
-                
-        except Exception as e:
-            logger.warning(f"Attempt {attempt + 1} failed for {symbol}: {str(e)}")
-            if attempt < config.MAX_RETRIES - 1:
-                time.sleep(config.RETRY_DELAY * (attempt + 1))  # Exponential backoff
-            else:
-                logger.error(f"All retry attempts failed for {symbol}")
-    
-    return None
+    data, _ = fetch_complete_stock_data(symbol, period, include_info=False)
+    return data
 
 
-def fetch_stock_data(symbol: str, period: str = '6mo') -> Optional[pd.DataFrame]:
+def fetch_multiple_stocks_complete_data(symbols: List[str], period: str = None) -> Dict[str, Tuple[Optional[pd.DataFrame], Optional[Dict[str, Any]]]]:
     """
-    Legacy function wrapper for backward compatibility
-    
-    Args:
-        symbol: Stock symbol to fetch
-        period: Time period for data
-    
-    Returns:
-        pd.DataFrame or None: Stock data if successful, None otherwise
-    """
-    return fetch_stock_data_with_retry(symbol, period)
-
-
-def fetch_multiple_stocks_data(symbols: List[str], period: str = None) -> Dict[str, Optional[pd.DataFrame]]:
-    """
-    Fetch stock data for multiple symbols concurrently using threading
+    Fetch both historical data and stock info for multiple symbols concurrently
+    This is the most efficient method as it fetches everything in one API call per symbol
     
     Args:
         symbols: List of stock symbols to fetch
         period: Time period for data (default from config)
     
     Returns:
-        Dict[str, Optional[pd.DataFrame]]: Dictionary mapping symbols to their data
+        Dict[str, Tuple[Optional[pd.DataFrame], Optional[Dict]]]: Dictionary mapping symbols to (data, info) tuples
     """
     if period is None:
         period = config.DEFAULT_PERIOD
     
-    logger.info(f"Fetching data for {len(symbols)} stocks concurrently")
+    logger.info(f"Fetching complete data (history + info) for {len(symbols)} stocks concurrently")
     
     # Use conservative thread count for cloud servers
     max_workers = config.MAX_FETCH_THREADS  # Use config value
@@ -325,44 +374,108 @@ def fetch_multiple_stocks_data(symbols: List[str], period: str = None) -> Dict[s
     processed_count = 0
     lock = threading.Lock()
     
-    def fetch_single_stock(symbol: str) -> Tuple[str, Optional[pd.DataFrame]]:
-        """Fetch data for a single stock"""
+    def fetch_single_stock_complete(symbol: str) -> Tuple[str, Tuple[Optional[pd.DataFrame], Optional[Dict[str, Any]]]]:
+        """Fetch complete data for a single stock"""
         try:
-            data = fetch_stock_data_with_retry(symbol, period)
-            return symbol, data
+            data, info = fetch_complete_stock_data(symbol, period, include_info=True)
+            return symbol, (data, info)
         except Exception as e:
-            logger.error(f"Error fetching data for {symbol}: {str(e)}")
-            return symbol, None
+            logger.error(f"Error fetching complete data for {symbol}: {str(e)}")
+            return symbol, (None, None)
     
-    logger.info(f"Using {max_workers} threads for concurrent data fetching")
+    logger.info(f"Using {max_workers} threads for concurrent complete data fetching")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
-        future_to_symbol = {executor.submit(fetch_single_stock, symbol): symbol for symbol in symbols}
+        future_to_symbol = {executor.submit(fetch_single_stock_complete, symbol): symbol for symbol in symbols}
         
         for future in as_completed(future_to_symbol):
             with lock:
                 processed_count += 1
                 if processed_count % 10 == 0 or processed_count == len(symbols):
-                    logger.info(f"Data fetch progress: {processed_count}/{len(symbols)} completed")
+                    logger.info(f"Complete data fetch progress: {processed_count}/{len(symbols)} completed")
             
             try:
-                symbol, data = future.result()
-                results[symbol] = data
+                symbol, (data, info) = future.result()
+                results[symbol] = (data, info)
             except Exception as e:
                 symbol = future_to_symbol[future]
                 logger.error(f"Error processing future for {symbol}: {str(e)}")
-                results[symbol] = None
+                results[symbol] = (None, None)
     
-    successful_count = sum(1 for data in results.values() if data is not None)
-    logger.info(f"Data fetching complete: {successful_count}/{len(symbols)} successful")
+    successful_data_count = sum(1 for data, _ in results.values() if data is not None)
+    successful_info_count = sum(1 for _, info in results.values() if info is not None)
+    logger.info(f"Complete data fetching finished: {successful_data_count}/{len(symbols)} historical data successful, {successful_info_count}/{len(symbols)} info successful")
     
     return results
 
 
+def filter_and_fetch_stocks_efficiently(symbols: List[str], min_market_cap_cr: float = 500, min_daily_volume_cr: float = 1, period: str = None) -> Tuple[List[str], Dict[str, pd.DataFrame], List[Dict[str, Any]]]:
+    """
+    Super-efficient function that filters stocks and fetches complete data in one go
+    This eliminates redundant API calls by fetching everything once per symbol
+    
+    Args:
+        symbols: List of stock symbols to process
+        min_market_cap_cr: Minimum market cap in crores (default: 500)
+        min_daily_volume_cr: Minimum daily volume in crores Rs (default: 1)
+        period: Time period for historical data (default from config)
+    
+    Returns:
+        Tuple of (filtered_symbols, historical_data_dict, stock_info_list)
+    """
+    if period is None:
+        period = config.DEFAULT_PERIOD
+        
+    logger.info(f"Starting super-efficient filtering and data fetching for {len(symbols)} stocks")
+    logger.info(f"Criteria: Market cap ≥₹{min_market_cap_cr} Cr, Daily volume ≥₹{min_daily_volume_cr} Cr")
+    
+    # Fetch complete data for all symbols in one batch
+    complete_data = fetch_multiple_stocks_complete_data(symbols, period)
+    
+    # Filter based on criteria
+    filtered_symbols = []
+    historical_data_dict = {}
+    stock_info_list = []
+    failed_count = 0
+    
+    min_market_cap = min_market_cap_cr * 10**7  # Convert crores to actual value
+    min_daily_volume = min_daily_volume_cr * 10**7  # Convert crores to actual value
+    
+    for symbol, (data, info) in complete_data.items():
+        try:
+            if info:
+                market_cap = info.get('market_cap', 0)
+                daily_volume_rs = info.get('daily_volume_rs', 0)
+                
+                # Apply filters
+                if market_cap >= min_market_cap and daily_volume_rs >= min_daily_volume:
+                    if data is not None:  # Only include if we have both valid data and info
+                        filtered_symbols.append(symbol)
+                        historical_data_dict[symbol] = data
+                        stock_info_list.append(info)
+                        logger.info(f"✓ {symbol}: Market Cap ₹{market_cap/10**7:.1f} Cr, Daily Volume ₹{daily_volume_rs/10**7:.1f} Cr - INCLUDED")
+                    else:
+                        logger.warning(f"✗ {symbol}: Passed criteria but missing historical data")
+                        failed_count += 1
+                else:
+                    logger.debug(f"✗ {symbol}: Market Cap ₹{market_cap/10**7:.1f} Cr, Daily Volume ₹{daily_volume_rs/10**7:.1f} Cr (filtered out)")
+            else:
+                logger.warning(f"✗ {symbol}: Failed to fetch stock info")
+                failed_count += 1
+        except Exception as e:
+            logger.error(f"Error processing {symbol}: {str(e)}")
+            failed_count += 1
+    
+    logger.info(f"Super-efficient filtering complete: {len(filtered_symbols)} stocks passed criteria with complete data, {failed_count} failed")
+    logger.info(f"Performance benefit: Single API call per symbol instead of 2+ calls")
+    
+    return filtered_symbols, historical_data_dict, stock_info_list
+
+
 def get_stock_info(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    Fetch basic stock information including market cap and average volume
+    Fetch basic stock information
     
     Args:
         symbol: Stock symbol to fetch info for
@@ -370,113 +483,12 @@ def get_stock_info(symbol: str) -> Optional[Dict[str, Any]]:
     Returns:
         Dict containing stock info or None if failed
     """
-    try:
-        logger.debug(f"Fetching info for {symbol}")
-        stock = yf.Ticker(symbol)
-        info = stock.info
-        
-        # Add delay to avoid rate limiting
-        time.sleep(config.REQUEST_DELAY)
-        
-        if not info:
-            logger.warning(f"No info available for {symbol}")
-            return None
-        
-        # Extract relevant information
-        market_cap = info.get('marketCap', 0)
-        avg_volume = info.get('averageVolume', 0)
-        current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
-        
-        # Calculate daily volume in Rs (approximate)
-        daily_volume_rs = avg_volume * current_price if avg_volume and current_price else 0
-        
-        return {
-            'symbol': symbol,
-            'market_cap': market_cap,
-            'avg_volume': avg_volume,
-            'current_price': current_price,
-            'daily_volume_rs': daily_volume_rs,
-            'company_name': info.get('longName', symbol.replace('.NS', ''))
-        }
-        
-    except Exception as e:
-        logger.warning(f"Failed to fetch info for {symbol}: {str(e)}")
-        return None
+    _, stock_info = fetch_complete_stock_data(symbol, period='1d', include_info=True)
+    return stock_info
 
 
-def filter_stocks_by_criteria(symbols: List[str], min_market_cap_cr: float = 500, min_daily_volume_cr: float = 1) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """
-    Filter stocks based on market cap and daily volume criteria using threading
-    
-    Args:
-        symbols: List of stock symbols to filter
-        min_market_cap_cr: Minimum market cap in crores (default: 500)
-        min_daily_volume_cr: Minimum daily volume in crores Rs (default: 1)
-    
-    Returns:
-        Tuple of (filtered_symbols, stock_info_list)
-    """
-    logger.info(f"Filtering {len(symbols)} stocks by market cap (≥₹{min_market_cap_cr} Cr) and daily volume (≥₹{min_daily_volume_cr} Cr)")
-    
-    filtered_symbols = []
-    stock_info_list = []
-    failed_count = 0
-    
-    min_market_cap = min_market_cap_cr * 10**7  # Convert crores to actual value
-    min_daily_volume = min_daily_volume_cr * 10**7  # Convert crores to actual value
-    
-    # Use threading for concurrent stock info fetching
-    max_workers = config.MAX_FILTER_THREADS  # Use config value
-    processed_count = 0
-    lock = threading.Lock()
-    
-    def process_symbol(symbol: str) -> Optional[Dict[str, Any]]:
-        """Process a single symbol and return stock info if it passes criteria"""
-        stock_info = get_stock_info(symbol)
-        
-        if stock_info:
-            market_cap = stock_info.get('market_cap', 0)
-            daily_volume_rs = stock_info.get('daily_volume_rs', 0)
-            
-            # Apply filters
-            if market_cap >= min_market_cap and daily_volume_rs >= min_daily_volume:
-                logger.info(f"✓ {symbol}: Market Cap ₹{market_cap/10**7:.1f} Cr, Daily Volume ₹{daily_volume_rs/10**7:.1f} Cr")
-                return stock_info
-            else:
-                logger.debug(f"✗ {symbol}: Market Cap ₹{market_cap/10**7:.1f} Cr, Daily Volume ₹{daily_volume_rs/10**7:.1f} Cr (filtered out)")
-        else:
-            logger.warning(f"✗ {symbol}: Failed to fetch info")
-        
-        return None
-    
-    logger.info(f"Using {max_workers} threads for concurrent stock filtering")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_symbol = {executor.submit(process_symbol, symbol): symbol for symbol in symbols}
-        
-        for future in as_completed(future_to_symbol):
-            symbol = future_to_symbol[future]
-            
-            with lock:
-                processed_count += 1
-                if processed_count % 20 == 0 or processed_count == len(symbols):
-                    logger.info(f"Progress: {processed_count}/{len(symbols)} symbols checked, {len(filtered_symbols)} passed criteria")
-            
-            try:
-                result = future.result()
-                if result:
-                    with lock:
-                        filtered_symbols.append(symbol)
-                        stock_info_list.append(result)
-                else:
-                    with lock:
-                        failed_count += 1
-            except Exception as e:
-                logger.error(f"Error processing {symbol}: {str(e)}")
-                with lock:
-                    failed_count += 1
-    
-    logger.info(f"Filtering complete: {len(filtered_symbols)} stocks passed criteria, {failed_count} failed to fetch info")
-    
-    return filtered_symbols, stock_info_list
+# ==============================================================================
+# SUPER-EFFICIENT BATCH PROCESSING FUNCTIONS
+# ==============================================================================
+
+

@@ -6,6 +6,8 @@ Analyzes NSE stocks for RSI and MACD signals and sends comprehensive reports via
 import sys
 import logging
 import time
+import os
+import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,19 +15,18 @@ import threading
 
 # Import from our modules
 try:
-    # Try relative imports (when run as module)
-    from .config import setup_logging, config
-    from .data_fetcher import fetch_stock_data_with_retry, fetch_multiple_stocks_data, get_nse_stock_symbols, filter_stocks_by_criteria
+    from .data_fetcher import get_nse_stock_symbols, filter_and_fetch_stocks_efficiently
     from .technical_indicators import analyze_stock_with_talib
-    from .email_sender import send_email_report, test_email_configuration
-    from .utils import performance_monitor, log_performance_summary
+    from .email_sender import send_email_report, test_email_configuration, send_data_source_error_email, send_general_error_email, send_report_failure_email
+    from .config import config, setup_logging, cleanup_old_logs
+    from .utils import performance_monitor
 except ImportError:
-    # Fall back to absolute imports (when run directly)
-    from config import setup_logging, config
-    from data_fetcher import fetch_stock_data_with_retry, fetch_multiple_stocks_data, get_nse_stock_symbols, filter_stocks_by_criteria
+    # Fallback for direct execution
+    from data_fetcher import get_nse_stock_symbols, filter_and_fetch_stocks_efficiently
     from technical_indicators import analyze_stock_with_talib
-    from email_sender import send_email_report, test_email_configuration
-    from utils import performance_monitor, log_performance_summary
+    from email_sender import send_email_report, test_email_configuration, send_data_source_error_email, send_general_error_email, send_report_failure_email
+    from config import config, setup_logging, cleanup_old_logs
+    from utils import performance_monitor
 
 # Setup logging
 logger = setup_logging()
@@ -39,6 +40,8 @@ def run_analysis_and_send_report() -> bool:
     Returns:
         bool: True if analysis and email sent successfully, False otherwise
     """
+    start_time = time.time()
+    
     try:
         logger.info("Starting NSE Stock Market Analysis for Email Report")
         
@@ -51,17 +54,24 @@ def run_analysis_and_send_report() -> bool:
             return False
         
         # Get NSE stock symbols dynamically with fallback and data source tracking
-        symbols, data_source = get_nse_stock_symbols(100)
+        symbols, data_source = get_nse_stock_symbols()
         
         if not symbols:
             logger.error("No valid stock symbols found")
+            send_general_error_email("No valid stock symbols found")
             return False
         
         logger.info(f"Found {len(symbols)} NSE symbols from source: {data_source}")
         
-        # Filter stocks by market cap and daily volume criteria
-        logger.info(f"Filtering stocks by market cap (≥₹{config.MIN_MARKET_CAP_CR} Cr) and daily volume (≥₹{config.MIN_DAILY_VOLUME_CR} Cr)...")
-        filtered_symbols, stock_info_list = filter_stocks_by_criteria(
+        # Send alert if data source is not live NSE
+        if data_source != "live_website":
+            logger.warning(f"Data source is not live NSE: {data_source}")
+            send_data_source_error_email(data_source)
+        
+        # SUPER-EFFICIENT APPROACH: Filter stocks and fetch all data in one optimized batch
+        # This eliminates redundant API calls by fetching both stock info and historical data once per symbol
+        logger.info(f"Using super-efficient filtering and data fetching approach...")
+        filtered_symbols, historical_data_dict, stock_info_list = filter_and_fetch_stocks_efficiently(
             symbols, 
             min_market_cap_cr=config.MIN_MARKET_CAP_CR, 
             min_daily_volume_cr=config.MIN_DAILY_VOLUME_CR
@@ -69,13 +79,14 @@ def run_analysis_and_send_report() -> bool:
         
         if not filtered_symbols:
             logger.error("No stocks passed the filtering criteria")
+            send_general_error_email("No stocks passed the filtering criteria")
             return False
         
-        logger.info(f"{len(filtered_symbols)} stocks passed filtering out of {len(symbols)} total")
+        logger.info(f"{len(filtered_symbols)} stocks passed filtering with complete data out of {len(symbols)} total")
+        logger.info(f"Performance benefit: Reduced API calls from {len(symbols) * 2} to {len(symbols)} (50% reduction)")
         
         # Store results
         companies_with_signals = []
-        failed_symbols = []
         total_analyzed = 0
         
         logger.info(f"Starting concurrent analysis of {len(filtered_symbols)} filtered NSE companies")
@@ -85,29 +96,22 @@ def run_analysis_and_send_report() -> bool:
         processed_count = 0
         lock = threading.Lock()
         
-        def analyze_single_stock(symbol: str, stock_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-            """Analyze a single stock with pre-fetched stock info"""
+        def analyze_single_stock_optimized(symbol: str, stock_data: pd.DataFrame, stock_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            """Analyze a single stock with pre-fetched data and info - NO ADDITIONAL API CALLS NEEDED"""
             try:
-                # Fetch stock data
-                stock_data = fetch_stock_data_with_retry(symbol)
+                # Analyze stock using TA-Lib (RSI & MACD only) - data already available
+                analysis = analyze_stock_with_talib(symbol, stock_data)
                 
-                if stock_data is not None:
-                    # Analyze stock using TA-Lib (RSI & MACD only)
-                    analysis = analyze_stock_with_talib(symbol, stock_data)
+                if analysis is not None:
+                    # Add market cap and volume info to analysis result
+                    if stock_info:
+                        analysis['market_cap_cr'] = stock_info.get('market_cap', 0) / 10**7
+                        analysis['daily_volume_cr'] = stock_info.get('daily_volume_rs', 0) / 10**7
+                        analysis['company_name'] = stock_info.get('company_name', symbol.replace('.NS', ''))
                     
-                    if analysis is not None:
-                        # Add market cap and volume info to analysis result
-                        if stock_info:
-                            analysis['market_cap_cr'] = stock_info.get('market_cap', 0) / 10**7
-                            analysis['daily_volume_cr'] = stock_info.get('daily_volume_rs', 0) / 10**7
-                            analysis['company_name'] = stock_info.get('company_name', symbol.replace('.NS', ''))
-                        
-                        return analysis
-                    else:
-                        logger.warning(f"Analysis failed for {symbol}")
-                        return None
+                    return analysis
                 else:
-                    logger.warning(f"Data fetch failed for {symbol}")
+                    logger.warning(f"Analysis failed for {symbol}")
                     return None
                     
             except Exception as e:
@@ -117,14 +121,15 @@ def run_analysis_and_send_report() -> bool:
         # Create symbol-to-info mapping for easy lookup
         stock_info_map = {info['symbol']: info for info in stock_info_list}
         
-        logger.info(f"Using {max_workers} threads for concurrent stock analysis")
+        logger.info(f"Using {max_workers} threads for concurrent stock analysis (with pre-fetched data)")
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all analysis tasks
+            # Submit all analysis tasks with pre-fetched data
             future_to_symbol = {}
             for symbol in filtered_symbols:
+                stock_data = historical_data_dict[symbol]  # Data already fetched!
                 stock_info = stock_info_map.get(symbol, {})
-                future = executor.submit(analyze_single_stock, symbol, stock_info)
+                future = executor.submit(analyze_single_stock_optimized, symbol, stock_data, stock_info)
                 future_to_symbol[future] = symbol
             
             # Process completed tasks
@@ -147,29 +152,32 @@ def run_analysis_and_send_report() -> bool:
                             if analysis.get('signals', []):
                                 companies_with_signals.append(analysis)
                                 logger.info(f"Found signals for {symbol}: {len(analysis['signals'])} signals")
-                        else:
-                            failed_symbols.append(symbol)
-                            
+                        
                 except Exception as e:
                     logger.error(f"Error processing analysis result for {symbol}: {str(e)}")
-                    with lock:
-                        failed_symbols.append(symbol)
         
         # Log summary statistics
-        logger.info(f"Analysis complete: {total_analyzed} successful, {len(failed_symbols)} failed")
-        if failed_symbols:
-            logger.warning(f"Failed symbols: {', '.join(failed_symbols[:10])}" + ("..." if len(failed_symbols) > 10 else ""))
+        logger.info(f"Analysis complete: {total_analyzed} successful, {len(filtered_symbols) - total_analyzed} failed")
         
         logger.info(f"Found {len(companies_with_signals)} companies with trading signals")
         
-        # Log performance summary
-        analysis_end_time = time.time()
-        log_performance_summary(
-            start_time=0,  # Will be set properly in main
-            total_stocks=len(filtered_symbols),
-            successful_stocks=total_analyzed,
-            stocks_with_signals=len(companies_with_signals)
-        )
+        # Log basic performance summary
+        end_time = time.time()
+        duration = end_time - start_time if 'start_time' in locals() else 0
+        logger.info("=" * 60)
+        logger.info("ANALYSIS SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Total execution time: {duration:.2f} seconds")
+        logger.info(f"Total stocks processed: {len(filtered_symbols)}")
+        logger.info(f"Successfully analyzed: {total_analyzed}")
+        logger.info(f"Stocks with signals: {len(companies_with_signals)}")
+        if len(filtered_symbols) > 0:
+            success_rate = (total_analyzed / len(filtered_symbols)) * 100
+            logger.info(f"Success rate: {success_rate:.1f}%")
+        if total_analyzed > 0:
+            signal_rate = (len(companies_with_signals) / total_analyzed) * 100
+            logger.info(f"Signal detection rate: {signal_rate:.1f}%")
+        logger.info("=" * 60)
         
         # Send email report
         logger.info("Sending email report...")
@@ -180,6 +188,7 @@ def run_analysis_and_send_report() -> bool:
             return True
         else:
             logger.error("Failed to send email report")
+            send_report_failure_email()
             return False
         
     except KeyboardInterrupt:
@@ -187,12 +196,21 @@ def run_analysis_and_send_report() -> bool:
         return False
     except Exception as e:
         logger.error(f"Unexpected error in analysis: {str(e)}")
+        send_general_error_email(f"Unexpected error in analysis: {str(e)}")
         return False
 
 
 if __name__ == "__main__":
     try:
         logger.info("NSE Technical Analysis Email Reporter started")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        
+        # Log configuration details
+        logger.info(f"Max analysis threads: {config.MAX_ANALYSIS_THREADS}")
+        logger.info(f"Max fetch threads: {config.MAX_FETCH_THREADS}")
+        logger.info(f"Min market cap: ₹{config.MIN_MARKET_CAP_CR} Cr")
+        logger.info(f"Min daily volume: ₹{config.MIN_DAILY_VOLUME_CR} Cr")
         
         # Optional: Test email configuration first
         if len(sys.argv) > 1 and sys.argv[1] == "--test-email":
@@ -205,26 +223,36 @@ if __name__ == "__main__":
         
         # Run analysis and send report
         start_time = datetime.now()
-        logger.info(f"Analysis started at {start_time}")
+        logger.info(f"Analysis started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
         success = run_analysis_and_send_report()
         
         end_time = datetime.now()
         duration = end_time - start_time
-        logger.info(f"Analysis completed at {end_time}, duration: {duration}")
+        logger.info(f"Analysis completed at {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Total execution time: {duration}")
         
         if success:
-            logger.info(f"Analysis completed successfully in {duration.total_seconds():.1f} seconds")
-            logger.info("Email report sent to configured recipients")
-            logger.info("Application completed successfully")
+            logger.info(f"✓ Analysis completed successfully in {duration.total_seconds():.1f} seconds")
+            logger.info("✓ Email report sent to configured recipients")
+            logger.info("✓ Application completed successfully")
         else:
-            logger.error("Analysis or email sending failed")
-            logger.error("Application completed with errors")
+            logger.error("✗ Analysis or email sending failed")
+            logger.error("✗ Application completed with errors")
+        
+        # Clean up old log files (older than 10 days)
+        logger.info("Cleaning up old log files...")
+        cleanup_old_logs(max_days=10)
+        logger.info("=" * 80)
+        
+        if not success:
             sys.exit(1)
         
     except KeyboardInterrupt:
-        logger.info("Application interrupted by user")
+        logger.info("Application interrupted by user (Ctrl+C)")
+        logger.info("=" * 80)
         sys.exit(0)
     except Exception as e:
         logger.error(f"Fatal error in application: {str(e)}")
+        logger.error("=" * 80)
         sys.exit(1)

@@ -451,3 +451,146 @@ def test_email_configuration() -> bool:
     except Exception as e:
         logger.error(f"Test email failed: {str(e)}")
         return False
+
+
+def send_data_source_error_email(data_source: str) -> bool:
+    """
+    Send email notification when data source is not live NSE
+    
+    Args:
+        data_source: The data source that was used (e.g., "first_fallback", "second_fallback")
+    
+    Returns:
+        bool: True if email sent successfully, False otherwise
+    """
+    try:
+        if not config.EMAIL_SENDER or not config.EMAIL_PASSWORD or not config.ALERT_EMAIL:
+            logger.error("Email configuration missing for data source error notification")
+            return False
+        
+        msg = MIMEMultipart()
+        msg['From'] = config.EMAIL_SENDER
+        msg['To'] = config.ALERT_EMAIL
+        msg['Subject'] = "NSE Analysis Alert - Data Source Issue"
+        
+        body = f"""
+        <html>
+        <body>
+            <h3>⚠️ Data Source Alert</h3>
+            <p>NSE Technical Analysis is not using live NSE data.</p>
+            <p><strong>Current data source:</strong> {data_source}</p>
+            <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}</p>
+        </body>
+        </html>
+        """
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        server = smtplib.SMTP(config.SMTP_SERVER, config.SMTP_PORT)
+        server.starttls()
+        server.login(config.EMAIL_SENDER, config.EMAIL_PASSWORD)
+        
+        text = msg.as_string()
+        server.sendmail(config.EMAIL_SENDER, [config.ALERT_EMAIL], text)
+        server.quit()
+        
+        logger.info("Data source error email sent successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send data source error email: {str(e)}")
+        return False
+
+
+def send_general_error_email(error_message: str) -> bool:
+    """
+    Send email notification when an error occurs during analysis
+    
+    Args:
+        error_message: Description of the error that occurred
+    
+    Returns:
+        bool: True if email sent successfully, False otherwise
+    """
+    try:
+        if not config.EMAIL_SENDER or not config.EMAIL_PASSWORD or not config.ALERT_EMAIL:
+            logger.error("Email configuration missing for general error notification")
+            return False
+        
+        msg = MIMEMultipart()
+        msg['From'] = config.EMAIL_SENDER
+        msg['To'] = config.ALERT_EMAIL
+        msg['Subject'] = "NSE Analysis Alert - Error Occurred"
+        
+        body = f"""
+        <html>
+        <body>
+            <h3>❌ Analysis Error</h3>
+            <p>An error occurred during NSE Technical Analysis.</p>
+            <p><strong>Error:</strong> {error_message}</p>
+            <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}</p>
+        </body>
+        </html>
+        """
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        server = smtplib.SMTP(config.SMTP_SERVER, config.SMTP_PORT)
+        server.starttls()
+        server.login(config.EMAIL_SENDER, config.EMAIL_PASSWORD)
+        
+        text = msg.as_string()
+        server.sendmail(config.EMAIL_SENDER, [config.ALERT_EMAIL], text)
+        server.quit()
+        
+        logger.info("General error email sent successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send general error email: {str(e)}")
+        return False
+
+
+def send_report_failure_email() -> bool:
+    """
+    Send email notification when analysis completes but final report couldn't be sent
+    
+    Returns:
+        bool: True if email sent successfully, False otherwise
+    """
+    try:
+        if not config.EMAIL_SENDER or not config.EMAIL_PASSWORD or not config.ALERT_EMAIL:
+            logger.error("Email configuration missing for report failure notification")
+            return False
+        
+        msg = MIMEMultipart()
+        msg['From'] = config.EMAIL_SENDER
+        msg['To'] = config.ALERT_EMAIL
+        msg['Subject'] = "NSE Analysis Alert - Report Send Failed"
+        
+        body = f"""
+        <html>
+        <body>
+            <h3>📧 Report Delivery Failed</h3>
+            <p>NSE Technical Analysis completed but could not send the final report.</p>
+            <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}</p>
+        </body>
+        </html>
+        """
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        server = smtplib.SMTP(config.SMTP_SERVER, config.SMTP_PORT)
+        server.starttls()
+        server.login(config.EMAIL_SENDER, config.EMAIL_PASSWORD)
+        
+        text = msg.as_string()
+        server.sendmail(config.EMAIL_SENDER, [config.ALERT_EMAIL], text)
+        server.quit()
+        
+        logger.info("Report failure email sent successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send report failure email: {str(e)}")
+        return False
