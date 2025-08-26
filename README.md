@@ -109,8 +109,8 @@ tail -f technical_analysis.log
 
 Perfect for cron jobs or scheduled tasks:
 ```bash
-# Example cron entry for daily reports at 9 AM
-0 9 * * * cd /path/to/project && .venv/bin/python src/main.py
+# Example cron entry for daily reports at 3:30 PM
+30 15 * * * cd /home/mtpat/Code/technical_analysis && .venv/bin/python src/main.py
 ```
 
 ## License
